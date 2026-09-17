@@ -13,9 +13,10 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 from transformers import DynamicCache
 
 from .common import digest, read_json, read_jsonl, write_json
+from .capture import capture_prompt, draft_logits
 from .runtime import load
-from .state import distribution
-from .validation import baseline_tests, error, ValidationError
+from .state import distribution, preserved_rng
+from .validation import baseline_tests, error, require_error, validate_snapshot, ValidationError
 
 
 def compare(a, b):
@@ -86,6 +87,33 @@ def check_baseline(mod, prompts, cfg, *, math_backend=False):
             return {"status": "failed", "error": str(exc)}
 
 
+def preflight_rows(natural):
+    # Fixed order, one first smoke prompt per domain; never search for easier passing cases.
+    selected = {}
+    for row in natural:
+        if row["split"] == "smoke":
+            selected.setdefault(row["domain"], row)
+    if len(selected) != 4:
+        raise ValueError("preflight requires the four frozen smoke domains")
+    return list(selected.values())
+
+
+@torch.inference_mode()
+def check_endpoint(mod, row, cfg, tolerance):
+    with sdpa_kernel(SDPBackend.MATH):
+        with preserved_rng():
+            torch.manual_seed(cfg["seed"])
+            snap, _ = capture_prompt(mod, row, cfg["max_new_tokens"])
+        if snap is None:
+            raise ValidationError("preflight has no valid normal boundary; not a passed cache test")
+        _, checks = validate_snapshot(mod, snap, tolerance)
+        # Exercise an intervening guide without calculating research effect estimates.
+        draft_logits(mod, snap, -snap["G"])
+        checks["A_B_A"] = require_error(snap["q_original_logits"], draft_logits(mod, snap),
+                                        tolerance["repeat"], "preflight A-B-A")
+        return {"checks": checks, "round": snap["round"], "prefix_tokens": len(snap["prefix"])}
+
+
 def main(args):
     if not os.environ.get("SLURM_JOB_ID") or socket.gethostname().split(".")[0] != "ariel-k2":
         raise ValueError("diagnostic requires an allocated K2 compute job")
@@ -100,8 +128,9 @@ def main(args):
     if len(rows) != 2:
         raise ValueError("missing baseline prompts")
     out.mkdir(parents=True, exist_ok=False)
+    math_gate = args.math_baseline_only or args.math_preflight
     report = {"scope": "diagnostic_only_not_S1_results", "status": "running", "prompts": [],
-              "baseline_sdpa": "math" if args.math_baseline_only else "default",
+              "baseline_sdpa": "math" if math_gate else "default",
               "config": cfg, "torch": torch.__version__, "cuda": torch.version.cuda,
               "gpu": torch.cuda.get_device_name(0),
               "note": "No tolerances changed. FP32 head/math SDPA are isolated probes, not production fixes."}
@@ -114,17 +143,31 @@ def main(args):
         with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
             # Reproduce the same generation warmup and gate before independent probes.
             report["baseline"] = check_baseline(mod, [r["prompt"] for r in rows], cfg,
-                                                math_backend=args.math_baseline_only)
+                                                math_backend=math_gate)
             print("Baseline:", report["baseline"]["status"], report["baseline"].get("error", ""), flush=True)
             write_json(out / "diagnostic.json", report)
-            if args.math_baseline_only:
+            if math_gate:
                 passed = report["baseline"]["status"] == "passed"
                 report["status"] = "complete" if passed else "failed"
                 for index, checks in enumerate(report["baseline"].get("reports", [])):
                     print(f"prompt={index} checks={checks}", flush=True)
-                print("Math baseline passed; endpoint validation still pending." if passed
-                      else "Math baseline failed; do not start the S1 experiment.", flush=True)
-                return 0 if passed else 2
+                if not passed or args.math_baseline_only:
+                    print("Math baseline passed; endpoint validation still pending." if passed
+                          else "Math baseline failed; do not start the S1 experiment.", flush=True)
+                    return 0 if passed else 2
+                report.update(status="running", endpoints=[])
+                for row in preflight_rows(natural):
+                    item = {"prompt_id": row["prompt_id"], "domain": row["domain"], "status": "running"}
+                    report["endpoints"].append(item)
+                    write_json(out / "diagnostic.json", report)
+                    print(f"Endpoint starting: {row['domain']} {row['prompt_id']}", flush=True)
+                    item.update(check_endpoint(mod, row, cfg, report["baseline"]["tolerance"]))
+                    item["status"] = "passed"
+                    print(f"Endpoint passed: {row['domain']} checks={item['checks']}", flush=True)
+                    write_json(out / "diagnostic.json", report)
+                report["status"] = "complete"
+                print("Math preflight passed (4 natural endpoints); full S1 experiment not run.", flush=True)
+                return 0
             for index, row in enumerate(rows):
                 ids, mask = mod.prep_for_gen([row["prompt"]])
                 if not mask.bool().all():
@@ -146,6 +189,12 @@ def main(args):
     except Exception as exc:
         # Avoid leaking credentials or signed download URLs in exception text.
         report.update(status="failed", error_type=type(exc).__name__)
+        if isinstance(exc, ValidationError):
+            report["error"] = str(exc)
+            print(f"Validation error: {exc}", flush=True)
+        for item in report.get("endpoints", []):
+            if item["status"] == "running":
+                item["status"] = "failed"
         print(f"Diagnostic stopped: {type(exc).__name__}; inspect diagnostic.json", flush=True)
         return 2
     finally:
@@ -158,6 +207,9 @@ if __name__ == "__main__":
     parser.add_argument("--upstream", default="vendor/SD-square")
     parser.add_argument("--data-dir", required=True)
     parser.add_argument("--output", required=True)
-    parser.add_argument("--math-baseline-only", action="store_true",
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--math-baseline-only", action="store_true",
                         help="Run the complete baseline under math SDPA, then stop before probes/endpoints")
+    mode.add_argument("--math-preflight", action="store_true",
+                      help="Math baseline plus four natural snapshot validation cases; no S1 effect measurements")
     raise SystemExit(main(parser.parse_args()))

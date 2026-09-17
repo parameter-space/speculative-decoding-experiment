@@ -3,12 +3,32 @@ from unittest.mock import patch
 
 import torch
 
-from signal_study.diagnose import check_baseline, fp32_head, probe
+from signal_study.diagnose import check_baseline, check_endpoint, fp32_head, preflight_rows, probe
 from signal_study.validation import ValidationError
 from test_tiny_upstream import tiny_model
 
 
 class DiagnosticTests(unittest.TestCase):
+    def test_preflight_selection_is_fixed_and_domain_balanced(self):
+        rows = [dict(split="smoke", domain=str(i % 4), prompt_id=str(i)) for i in range(8)]
+        self.assertEqual([r["prompt_id"] for r in preflight_rows(rows)], ["0", "1", "2", "3"])
+        with self.assertRaises(ValueError):
+            preflight_rows(rows[:3])
+
+    def test_endpoint_math_snapshot_checks(self):
+        torch.set_num_threads(2)
+        cfg = dict(seed=11, max_new_tokens=32)
+        with patch("torch.cuda.synchronize"):
+            result = check_endpoint(tiny_model(), dict(prompt="toy"), cfg,
+                                    dict(repeat=1e-6, alignment=1e-5, alignment_tv=1e-6))
+        self.assertEqual(result["round"], 2)
+        self.assertEqual(result["checks"]["A_B_A"], 0)
+
+    def test_missing_boundary_does_not_pass(self):
+        with patch("signal_study.diagnose.capture_prompt", return_value=(None, {})):
+            with self.assertRaises(ValidationError):
+                check_endpoint(None, {}, dict(seed=11, max_new_tokens=32), {})
+
     def test_math_baseline_scope_and_failure_restore(self):
         def flags():
             return (torch.backends.cuda.flash_sdp_enabled(), torch.backends.cuda.mem_efficient_sdp_enabled(),

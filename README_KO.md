@@ -1,6 +1,6 @@
 # SD² S1 실험 코드
 
-상태: 2026-09-17 로컬 테스트 30개 통과. K2의 실제 8B 모델은 로딩·baseline 생성 검사까지 진행했으나 clean-prefix TV 검사에서 중단됐습니다. 본 S1 endpoint 결과는 아직 없습니다. 로컬 `reports/local_tests.json`은 **작은 무작위 CPU 모델**의 테스트 결과이며 연구 결과가 아닙니다. 이 보고서는 Git에 포함하지 않습니다.
+상태: 2026-09-17 로컬 테스트 33개 통과. K2의 실제 8B 모델은 기본 SDPA에서 clean-prefix TV 검사에 실패했으나 math SDPA의 baseline 전체 검사는 통과했습니다. 실제 snapshot 검증 및 본 S1 endpoint 결과는 아직 없습니다. 로컬 `reports/local_tests.json`은 **작은 무작위 CPU 모델**의 테스트 결과이며 연구 결과가 아닙니다. 이 보고서는 Git에 포함하지 않습니다.
 
 ### Baseline 실패 원인 진단
 
@@ -22,6 +22,14 @@ Slurm에 보이는 첫 GPU 한 장과 이미 다운로드한 캐시만 사용합
 ```bash
 bash scripts/diagnose_k2.sh --math-baseline-only
 ```
+
+2026-09-17 사용자 K2 로그에서 math baseline의 두 입력 모두 hook identity, 32-token greedy AR identity, clean-prefix logit/TV 검사를 통과했습니다. 다음 단계는 각 smoke domain의 첫 입력 하나씩(총 4개)을 고정 선택한 snapshot 사전 검증입니다.
+
+```bash
+bash scripts/diagnose_k2.sh --math-preflight
+```
+
+Baseline에서 정한 tolerance를 그대로 사용해 캐시 복원·반복·self-copy·G→Delta·fresh/cached Target·A-B-A를 검사합니다. 경계가 없거나 검사에 실패하면 실패로 종료하며 쉬운 다른 입력으로 교체하지 않습니다. 이 명령은 전체 calibration, binding, S1 효과 측정을 수행하지 않습니다. 성공해도 전체 S1 실행의 사례별 검사는 계속 필요합니다.
 
 ## 1. 작업 루트와 Git 배포
 
