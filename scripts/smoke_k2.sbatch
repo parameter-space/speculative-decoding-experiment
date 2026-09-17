@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=sd2-s1-smoke
-#SBATCH --partition=debug_ugrad
+#SBATCH --partition=batch_ugrad
 #SBATCH --account=ugrad
 #SBATCH --qos=qos_leetj3610_2026_2
 #SBATCH --nodelist=ariel-k2
@@ -13,4 +13,10 @@
 set -euo pipefail
 # Submit from the project root after mkdir -p logs and export S1_DATA_DIR=...
 # Install/setup once in an interactive compute allocation first.
+export S1_SDPA_BACKEND=math
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export HF_DATASETS_OFFLINE=1
+export PYTHONUNBUFFERED=1
+printf '%s\n' 'S1 smoke: math SDPA, unchanged precision/tolerances, cached models/data.'
 bash scripts/run_k2.sh

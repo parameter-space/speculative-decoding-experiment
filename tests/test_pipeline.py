@@ -13,6 +13,12 @@ from test_tiny_upstream import tiny_model
 
 class PipelineTests(unittest.TestCase):
     def test_reports_and_all_conditions_end_to_end_with_tiny_cpu_fixture(self):
+        self._run_tiny_pipeline("default")
+
+    def test_math_policy_full_pipeline_and_manifest(self):
+        self._run_tiny_pipeline("math")
+
+    def _run_tiny_pipeline(self, policy):
         mod = tiny_model()
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -33,7 +39,7 @@ class PipelineTests(unittest.TestCase):
             args = SimpleNamespace(config=root / "config.json", output=root / "out", data_dir=root,
                                    upstream="unused-test-fixture", save_snapshots=False)
             with ExitStack() as stack:
-                stack.enter_context(patch.dict("os.environ", {"SLURM_JOB_ID": "offline-test"}))
+                stack.enter_context(patch.dict("os.environ", {"SLURM_JOB_ID": "offline-test", "S1_SDPA_BACKEND": policy}))
                 stack.enter_context(patch("signal_study.run.socket.gethostname", return_value="ariel-k2"))
                 stack.enter_context(patch("signal_study.run.environment", return_value={"kind": "MOCK_CPU_TEST"}))
                 stack.enter_context(patch("signal_study.run.load", return_value=(mod, {"kind": "tiny random CPU fixture"})))
@@ -46,6 +52,8 @@ class PipelineTests(unittest.TestCase):
                 code = run(args)
             self.assertEqual(code, 0)
             self.assertEqual(read_json(root / "out/reports/tests.json")["status"], "complete")
+            self.assertEqual(read_json(root / "out/manifests/models.json")["sdpa_kernel_policy"], policy)
+            self.assertEqual(read_json(root / "out/reports/tests.json")["sdpa_kernel_policy"], policy)
             for required in ("manifests/environment.json", "manifests/models.json", "tensor_map.json",
                              "trace/boundaries.jsonl", "results/S1_endpoint.csv", "results/S1_cases.md",
                              "reports/tests.json", "reports/HANDOFF.md"):

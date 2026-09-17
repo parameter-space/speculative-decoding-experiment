@@ -13,7 +13,7 @@ import torch
 
 from .capture import capture_prompt, draft_logits, source_metadata, synthetic_snapshot
 from .common import append_jsonl, choose_donor, digest, file_digest, read_json, read_jsonl, validate_splits, write_json
-from .runtime import environment, load
+from .runtime import environment, load, sdpa_context
 from .parallel import partition_rows
 from .state import distribution, overlap, preserved_rng
 from .validation import ValidationError, baseline_tests, require_error, validate_snapshot
@@ -108,6 +108,9 @@ def run(args):
     try:
         if not os.environ.get("SLURM_JOB_ID") or socket.gethostname().split(".")[0] != "ariel-k2":
             raise ValueError("real checkpoint runs require an allocated Slurm compute job")
+        sdpa_policy = os.environ.get("S1_SDPA_BACKEND", "default")
+        attention_context = sdpa_context(sdpa_policy)
+        tests["sdpa_kernel_policy"] = sdpa_policy
         write_json(out / "manifests/environment.json", environment())
         if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
             raise ValueError("real smoke requires exactly one visible allocated CUDA GPU")
@@ -129,6 +132,8 @@ def run(args):
                    for p in sorted(Path(__file__).parent.glob("*.py"))})
         stage = "model_load"
         mod, models = load(cfg, dataset_manifest, args.upstream, out / "reports")
+        models["sdpa_kernel_policy"] = sdpa_policy
+        models["sdpa_policy_scope"] = "all baseline/calibration/generation/endpoint forward calls"
         write_json(out / "manifests/models.json", models)
         evaluation = [r for r in natural if r["split"] == "smoke"]
         calibration = [r for r in natural if r["split"] == "calibration"]
@@ -142,7 +147,7 @@ def run(args):
                    "evaluation_prompt_ids": [r["prompt_id"] for r in evaluation],
                    "binding_prompt_ids": [r["prompt_id"] for r in binding]})
         torch.cuda.reset_peak_memory_stats()
-        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
+        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16), attention_context:
             stage = "baseline"
             tests["baseline"], tolerance = baseline_tests(mod, baseline_prompts, cfg)
             tests["tolerance"] = tolerance

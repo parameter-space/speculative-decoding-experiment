@@ -8,8 +8,18 @@ from pathlib import Path
 import platform
 import subprocess
 import sys
+from contextlib import nullcontext
 
 from .common import file_digest, read_json, write_json
+
+
+def sdpa_context(policy):
+    from torch.nn.attention import SDPBackend, sdpa_kernel
+    if policy == "math":
+        return sdpa_kernel(SDPBackend.MATH)
+    if policy == "default":
+        return nullcontext()
+    raise ValueError("S1_SDPA_BACKEND must be default or math")
 
 
 def import_upstream(repo, commit):

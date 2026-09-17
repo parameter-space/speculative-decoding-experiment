@@ -1,6 +1,6 @@
 # SD² S1 실험 코드
 
-상태: 2026-09-17 로컬 테스트 33개 통과. K2의 실제 8B 모델은 기본 SDPA에서 clean-prefix TV 검사에 실패했으나 math SDPA의 baseline 전체 검사는 통과했습니다. 실제 snapshot 검증 및 본 S1 endpoint 결과는 아직 없습니다. 로컬 `reports/local_tests.json`은 **작은 무작위 CPU 모델**의 테스트 결과이며 연구 결과가 아닙니다. 이 보고서는 Git에 포함하지 않습니다.
+상태: 2026-09-17 로컬 테스트 36개 통과. K2의 실제 8B 모델은 math SDPA에서 baseline 및 네 영역의 snapshot preflight를 통과했습니다. 전체 S1 smoke batch 완료 결과는 아직 없습니다. 로컬 `reports/local_tests.json`은 **작은 무작위 CPU 모델**의 테스트 결과이며 연구 결과가 아닙니다. 이 보고서는 Git에 포함하지 않습니다.
 
 ### Baseline 실패 원인 진단
 
@@ -90,6 +90,7 @@ K2 실측 경로는 복수형 `/local_datasets`와 `/data2/local_datasets`입니
 
 ```bash
 export S1_DATA_DIR=/data2/local_datasets/leetj3610/sd2_s1_smoke_v1
+export S1_SDPA_BACKEND=math
 bash scripts/run_k2.sh
 ```
 
@@ -97,7 +98,17 @@ bash scripts/run_k2.sh
 
 데이터 준비는 한 번만 수행합니다. 이후 Slurm이 배정한 GPU마다 독립 worker가 Target8B+Drafter1B 전체를 올립니다. 각 worker는 같은 두 prompt의 원본/관찰 hook·greedy AR 검사와 calibration32를 수행한 후 자연8개·binding4쌍씩 처리합니다. 합계는 자연16개·binding8쌍 그대로입니다. Batch1, 입력 최대896/생성128, draft block4, 개입은 depth1이며 학습하지 않습니다. Tensor parallel이나 VRAM 통합은 사용하지 않습니다. 한 장만 보이는 할당에서도 단일 worker로 동작합니다.
 
-환경 설치가 끝났고 새 Batch Job이 필요한 경우에만 master의 프로젝트 루트에서 `mkdir -p logs`, `export S1_DATA_DIR=...`, `sbatch scripts/smoke_k2.sbatch`를 사용할 수 있습니다. 위 interactive 작업과 불필요하게 중복 실행하지 않습니다. Dataset은 배치가 실행될 K2 local SSD에 있어야 합니다.
+사전 검증이 끝나면 interactive 셸에서 `exit`로 할당을 반환하고 master에서 아래 명령으로 S1 smoke를 제출합니다. master에서는 모델이나 Python을 실행하지 않습니다. 이미 제출했다면 중복 제출하지 않습니다.
+
+```bash
+cd /ceph_data/leetj3610/experiment
+mkdir -p logs
+export S1_DATA_DIR=/data2/local_datasets/leetj3610/sd2_s1_smoke_v1
+sbatch scripts/smoke_k2.sbatch
+squeue -u "$USER" -o "%.18i %.9T %.20N %.12L %R"
+```
+
+Batch 요청은 `batch_ugrad`, K2 GPU 2장, CPU 16개, RAM 128G, 제한 2시간입니다. 기존 모델·데이터 캐시만 사용하며 math SDPA를 baseline·calibration·모든 생성/endpoint 계산에 일관되게 적용합니다. `S1_SDPA_BACKEND=math`는 worker 모델 manifest와 검사 보고서에 기록되어 다른 backend 결과와 섞이지 않습니다. config/data hash, 모델 weight dtype, 오차 상한은 변경하지 않았습니다. 이 설정의 결과로 기본 fused SDPA 속도를 주장하지 않습니다. 실행 중에는 코드를 pull/수정하지 않습니다.
 
 ## 4. 결과와 중단 해석
 
