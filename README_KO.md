@@ -6,7 +6,7 @@
 
 로컬 `Speculative Decoding/experiment`만 VS Code와 Git 저장소의 루트로 사용합니다. 상위 연구 문서 폴더는 업로드하지 않습니다. 코드 전달은 ZIP/SFTP가 아니라 **로컬 수정 → commit/push → Seraph clone/pull**로 통일합니다.
 
-GitHub 저장소: `https://github.com/parameter-space/speculative-decoding-experiment` (비공개).
+GitHub 저장소: `https://github.com/parameter-space/speculative-decoding-experiment` (사용자 요청으로 공개).
 
 최초 내려받기는 할당된 K2 셸에서 실행합니다. 이미 `/ceph_data/leetj3610/experiment`가 있으면 덮어쓰지 말고 기존 저장소부터 확인합니다.
 
@@ -17,7 +17,7 @@ cd experiment
 git log -1 --oneline
 ```
 
-비공개 저장소 인증은 서버에서 사용자가 직접 설정합니다. 토큰을 URL, 명령 인자, 코드, 문서 또는 채팅에 넣지 않습니다. GitHub 계정 비밀번호는 HTTPS Git 인증용이 아닙니다. 서버 인증이 아직 없으면 clone 전에 인증 방법을 안내받습니다.
+공개 저장소이므로 위 HTTPS clone과 이후 pull에는 GitHub 로그인이 필요하지 않습니다. 로컬 push에는 소유 계정 인증이 필요합니다. 토큰을 URL, 명령 인자, 코드, 문서 또는 채팅에 넣지 않습니다.
 
 이후 로컬에서 변경 파일을 검토하고 commit/push합니다. 서버에서 해당 코드의 실행이 끝난 뒤 다음으로 업데이트합니다.
 
