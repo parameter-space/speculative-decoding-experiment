@@ -32,7 +32,7 @@ def baseline_tests(mod, prompts, cfg):
     was_greedy = mod.greedy_sample
     try:
         mod.greedy_sample = True
-        for prompt in prompts:
+        for prompt_index, prompt in enumerate(prompts):
             ids, mask = mod.prep_for_gen([prompt])
             with preserved_rng():
                 torch.manual_seed(cfg["seed"])
@@ -69,7 +69,16 @@ def baseline_tests(mod, prompts, cfg):
             kernel_error = error(logits_full, logits_split)
             kernel_tv = float((distribution(logits_full) - distribution(logits_split)).abs().sum() / 2)
             if kernel_error > cfg["alignment_logit_cap"] or kernel_tv > cfg["alignment_tv_cap"]:
-                raise ValidationError("independent clean-prefix kernel discrepancy exceeds predeclared cap")
+                raise ValidationError(
+                    "independent clean-prefix kernel discrepancy exceeds predeclared cap: "
+                    f"prompt_index={prompt_index}, prefix_tokens={prefix.shape[1]}, "
+                    f"max_logit_error={kernel_error:.9g} (cap={cfg['alignment_logit_cap']:.9g}), "
+                    f"TV={kernel_tv:.9g} (cap={cfg['alignment_tv_cap']:.9g}), "
+                    f"full_argmax={logits_full.argmax(-1).item()}, "
+                    f"split_argmax={logits_split.argmax(-1).item()}, "
+                    f"full_dtype={logits_full.dtype}, split_dtype={logits_split.dtype}; "
+                    "hook identity and greedy AR identity passed for this prompt"
+                )
             largest_kernel_error = max(largest_kernel_error, kernel_error)
             largest_kernel_tv = max(largest_kernel_tv, kernel_tv)
             reports.append({"hook_identity": "passed", "greedy_AR_identity": "passed", "compared_tokens": len(ar),
