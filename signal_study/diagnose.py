@@ -75,6 +75,17 @@ def probe(model, ids, *, explicit=False, math_backend=False):
             "explicit_positions_mask": explicit, "forced_math_sdpa": math_backend}
 
 
+def check_baseline(mod, prompts, cfg, *, math_backend=False):
+    # Apply consistently to generation, target AR, and clean-prefix comparisons.
+    # The context restores backend settings even when a validation gate raises.
+    with sdpa_kernel(SDPBackend.MATH) if math_backend else nullcontext():
+        try:
+            baseline, tolerance = baseline_tests(mod, prompts, cfg)
+            return {"status": "passed", "reports": baseline, "tolerance": tolerance}
+        except ValidationError as exc:
+            return {"status": "failed", "error": str(exc)}
+
+
 def main(args):
     if not os.environ.get("SLURM_JOB_ID") or socket.gethostname().split(".")[0] != "ariel-k2":
         raise ValueError("diagnostic requires an allocated K2 compute job")
@@ -90,6 +101,7 @@ def main(args):
         raise ValueError("missing baseline prompts")
     out.mkdir(parents=True, exist_ok=False)
     report = {"scope": "diagnostic_only_not_S1_results", "status": "running", "prompts": [],
+              "baseline_sdpa": "math" if args.math_baseline_only else "default",
               "config": cfg, "torch": torch.__version__, "cuda": torch.version.cuda,
               "gpu": torch.cuda.get_device_name(0),
               "note": "No tolerances changed. FP32 head/math SDPA are isolated probes, not production fixes."}
@@ -101,13 +113,18 @@ def main(args):
         report["models"] = models
         with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
             # Reproduce the same generation warmup and gate before independent probes.
-            try:
-                baseline, tolerance = baseline_tests(mod, [r["prompt"] for r in rows], cfg)
-                report["baseline"] = {"status": "passed", "reports": baseline, "tolerance": tolerance}
-            except ValidationError as exc:
-                report["baseline"] = {"status": "failed", "error": str(exc)}
+            report["baseline"] = check_baseline(mod, [r["prompt"] for r in rows], cfg,
+                                                math_backend=args.math_baseline_only)
             print("Baseline:", report["baseline"]["status"], report["baseline"].get("error", ""), flush=True)
             write_json(out / "diagnostic.json", report)
+            if args.math_baseline_only:
+                passed = report["baseline"]["status"] == "passed"
+                report["status"] = "complete" if passed else "failed"
+                for index, checks in enumerate(report["baseline"].get("reports", [])):
+                    print(f"prompt={index} checks={checks}", flush=True)
+                print("Math baseline passed; endpoint validation still pending." if passed
+                      else "Math baseline failed; do not start the S1 experiment.", flush=True)
+                return 0 if passed else 2
             for index, row in enumerate(rows):
                 ids, mask = mod.prep_for_gen([row["prompt"]])
                 if not mask.bool().all():
@@ -141,4 +158,6 @@ if __name__ == "__main__":
     parser.add_argument("--upstream", default="vendor/SD-square")
     parser.add_argument("--data-dir", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--math-baseline-only", action="store_true",
+                        help="Run the complete baseline under math SDPA, then stop before probes/endpoints")
     raise SystemExit(main(parser.parse_args()))

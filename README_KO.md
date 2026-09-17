@@ -1,6 +1,6 @@
 # SD² S1 실험 코드
 
-상태: 2026-09-17 로컬 테스트 28개 통과. K2의 실제 8B 모델은 로딩·baseline 생성 검사까지 진행했으나 clean-prefix TV 검사에서 중단됐습니다. 본 S1 endpoint 결과는 아직 없습니다. 로컬 `reports/local_tests.json`은 **작은 무작위 CPU 모델**의 테스트 결과이며 연구 결과가 아닙니다. 이 보고서는 Git에 포함하지 않습니다.
+상태: 2026-09-17 로컬 테스트 30개 통과. K2의 실제 8B 모델은 로딩·baseline 생성 검사까지 진행했으나 clean-prefix TV 검사에서 중단됐습니다. 본 S1 endpoint 결과는 아직 없습니다. 로컬 `reports/local_tests.json`은 **작은 무작위 CPU 모델**의 테스트 결과이며 연구 결과가 아닙니다. 이 보고서는 Git에 포함하지 않습니다.
 
 ### Baseline 실패 원인 진단
 
@@ -15,7 +15,13 @@ bash scripts/diagnose_k2.sh
 
 Slurm에 보이는 첫 GPU 한 장과 이미 다운로드한 캐시만 사용합니다. 캐시가 없으면 다운로드하지 않고 중단합니다. `default`, `explicit`, `math` 각각에서 full-prefix/cached-tail과 같은 경로의 반복 결과를 비교하고, 동일 hidden의 출력층만 FP32로 다시 계산한 수치도 기록합니다. FP32 출력층은 저장된 weight를 변환하며 원본의 더 높은 정밀도 weight를 복원하는 것이 아닙니다. 기존 검사 허용치·실험 설정은 변경하지 않습니다.
 
-출력은 `runs/diagnose-<job>-<unique>/console.log` 및 `probe/diagnostic.json`에 남습니다. `Diagnostic complete`는 진단 완료이지 S1 검증 통과가 아닙니다. GPU 실측 진단 결과는 아직 미확인입니다.
+출력은 `runs/diagnose-<job>-<unique>/console.log` 및 `probe/diagnostic.json`에 남습니다. `Diagnostic complete`는 진단 완료이지 S1 검증 통과가 아닙니다.
+
+2026-09-17 K2의 두 입력 진단에서 math SDPA의 TV 및 최대 logit 오차는 기존 상한 이내였습니다. 다음 명령은 math SDPA를 생성·AR·clean-prefix 계산 전체에 일관되게 적용하여 baseline만 검사하고 종료합니다. 실패하면 종료 코드 2이며, 통과해도 calibration/endpoint 실험은 실행하지 않습니다. 본 실행의 기본 backend나 config는 변경하지 않습니다.
+
+```bash
+bash scripts/diagnose_k2.sh --math-baseline-only
+```
 
 ## 1. 작업 루트와 Git 배포
 
