@@ -4,13 +4,13 @@ source "$(dirname -- "$0")/seraph_common.sh"
 conda activate "$S1_ENV"
 : "${S1_DATA_DIR:?Set S1_DATA_DIR to your permitted compute-local dataset directory.}"
 case "$S1_DATA_DIR" in
-  /local_dataset/leetj3610/*|/data2/local_dataset/leetj3610/*) ;;
+  /local_datasets/leetj3610/*|/data2/local_datasets/leetj3610/*) ;;
   *) printf '%s\n' 'STOP: dataset path must be inside your permitted local SSD directory.' >&2; exit 1 ;;
 esac
 mkdir -p -- "$S1_DATA_DIR"
 DATA_RESOLVED="$(cd -- "$S1_DATA_DIR" && pwd -P)"
 case "$DATA_RESOLVED" in
-  /local_dataset/leetj3610/*|/data2/local_dataset/leetj3610/*) ;;
+  /local_datasets/leetj3610/*|/data2/local_datasets/leetj3610/*) ;;
   *) printf '%s\n' 'STOP: dataset path resolves outside the local SSD directory.' >&2; exit 1 ;;
 esac
 export HF_DATASETS_CACHE="$DATA_RESOLVED/cache"

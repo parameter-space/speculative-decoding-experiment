@@ -57,10 +57,10 @@ bash scripts/setup_k2.sh
 
 ## 3. 데이터 준비와 첫 실험
 
-본인에게 허용된 node-local dataset 경로를 확인한 뒤 지정합니다. 아래는 해당 경로가 실제로 존재하고 본인이 쓸 수 있을 때의 예입니다. 허용 경로가 `/data2/local_dataset`이면 그 경로로 바꿉니다.
+K2 실측 경로는 복수형 `/local_datasets`와 `/data2/local_datasets`입니다. 현재 실행은 여유 공간을 확인한 `/data2/local_datasets`의 본인 하위 폴더를 사용합니다. 다른 노드로 이동하면 경로와 권한을 다시 확인합니다.
 
 ```bash
-export S1_DATA_DIR=/local_dataset/leetj3610/sd2_s1_smoke_v1
+export S1_DATA_DIR=/data2/local_datasets/leetj3610/sd2_s1_smoke_v1
 bash scripts/run_k2.sh
 ```
 
