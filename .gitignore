@@ -1,0 +1,37 @@
+# Local environments, upstream checkout, generated data and outputs
+.venv/
+.cache/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+vendor/
+data/
+datasets/
+models/
+checkpoints/
+cache/
+runs/
+logs/
+reports/
+tmp/
+out/
+*.log
+*.zip
+*.tar*
+*.pt
+*.pth
+*.bin
+*.safetensors
+# Machine-local connection settings and credentials never belong in Git
+.vscode/
+.idea/
+.env
+.env.*
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+credentials*
+secrets*
+.DS_Store
+Thumbs.db
