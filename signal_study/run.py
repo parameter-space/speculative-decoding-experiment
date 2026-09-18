@@ -8,6 +8,7 @@ import re
 import sys
 import socket
 from collections import Counter
+from contextlib import contextmanager, ExitStack
 
 import torch
 
@@ -15,11 +16,35 @@ from .capture import capture_prompt, draft_logits, source_metadata, synthetic_sn
 from .common import append_jsonl, choose_donor, digest, file_digest, read_json, read_jsonl, validate_splits, write_json
 from .runtime import environment, load, sdpa_context
 from .parallel import partition_rows
-from .state import distribution, overlap, preserved_rng
+from .state import METRIC_POLICY, distribution, overlap, preserved_rng
 from .validation import ValidationError, baseline_tests, require_error, validate_snapshot
 
 
 CONDITIONS = ("original", "self_copy", "mean", "mean_rms", "matched_donor")
+
+
+def execution_policy(reference=False):
+    if not reference:
+        return {"id": "s1-official-eval-v1", "scope": "S1_endpoint_effect_measurement",
+                "precision": "official_eval"}
+    from .gpu_attention import POLICY
+    return dict(POLICY, id="s1-target-fp64-exp-sum-v1", reference_policy_id=POLICY["id"],
+                scope="S1_endpoint_effect_measurement", precision="target_FP64_drafter_BF16",
+                note="Separate numerical-reference S1; not official_eval reproduction or a speed benchmark.")
+
+
+@contextmanager
+def execution_context(mod, reference, tests):
+    with ExitStack() as stack:
+        if reference:
+            from .reference_precision import reference_operators
+            from .gpu_attention import gpu_attention
+            from .live_precision import live_target_precision
+            tests["reference_arithmetic"] = stack.enter_context(reference_operators(mod))
+            tests["gpu_attention"] = {}
+            stack.enter_context(gpu_attention(tests["gpu_attention"]))
+            tests["dtype_audit"] = stack.enter_context(live_target_precision(mod, target_dtype=torch.float64))
+        yield
 
 
 def safe_error(exc):
@@ -36,7 +61,7 @@ def top5(tokenizer, p):
 
 def case_rows(mod, row, snap, p, tests, tolerance, mean=None, pool=(), donor_g=None, partner=None):
     meta = source_metadata(snap, row)
-    q_orig = distribution(snap["q_original_logits"])
+    q_orig = distribution(snap["q_original_logits"], context="endpoint.drafter.original")
     a_orig = overlap(p, q_orig)
     choices = {"original": snap["G"], "self_copy": snap["G"].clone()}
     donor = None
@@ -66,7 +91,7 @@ def case_rows(mod, row, snap, p, tests, tolerance, mean=None, pool=(), donor_g=N
         logits = draft_logits(mod, snap, guide)
         if condition in ("original", "self_copy"):
             require_error(snap["q_original_logits"], logits, tolerance["repeat"], condition)
-        q = distribution(logits)
+        q = distribution(logits, context=f"endpoint.drafter.{condition}")
         a = overlap(p, q)
         result.update(A=a, delta_A_vs_original=a - a_orig, U_original_over_control=a_orig - a,
                       signal_rms=float(guide.float().square().mean().sqrt()))
@@ -97,20 +122,36 @@ def write_csv(path, rows):
 
 def run(args):
     cfg, out, data = read_json(args.config), Path(args.output), Path(args.data_dir)
+    reference = getattr(args, "target_fp64_reference", False)
+    policy = execution_policy(reference)
+    if reference and (getattr(args, "shard_index", 0) != 0 or getattr(args, "shard_count", 1) != 1):
+        raise ValueError("FP64 S1 reference requires a single unsharded worker")
     if cfg["depth"] != 1 or cfg["batch_size"] != 1 or cfg["precision"] != "official_eval":
-        raise ValueError("this release only supports depth1, batch1, official_eval precision")
+        raise ValueError("requires depth1, batch1, official_eval loading config; precision override is explicit")
     if out.exists():
         raise FileExistsError("output exists; use a new run directory")
     for sub in ("manifests", "trace", "results", "reports"):
         (out / sub).mkdir(parents=True, exist_ok=True)
-    results, cases, tests = [], [], {"status": "running", "stage": "environment", "cases": []}
+    results, cases, tests = [], [], {"status": "running", "stage": "environment", "cases": [],
+                                    "metric_policy": METRIC_POLICY, "execution_policy": policy}
+    write_json(out / "manifests/execution_policy.json", policy)
+
+    def checkpoint():
+        # Interrupted runs must never leave apparently publishable numeric rows.
+        for result in results:
+            result.update(execution_policy_id=policy["id"], run_valid=False)
+        tests.update(stage=stage)
+        write_json(out / "reports/tests.json", tests)
+        write_csv(out / "results/S1_endpoint.csv", results)
+
     status, stage = "failed", "environment"
     try:
         if not os.environ.get("SLURM_JOB_ID") or socket.gethostname().split(".")[0] != "ariel-k2":
             raise ValueError("real checkpoint runs require an allocated Slurm compute job")
-        sdpa_policy = os.environ.get("S1_SDPA_BACKEND", "default")
+        sdpa_policy = "math" if reference else os.environ.get("S1_SDPA_BACKEND", "default")
         attention_context = sdpa_context(sdpa_policy)
         tests["sdpa_kernel_policy"] = sdpa_policy
+        tests["target_attention_policy"] = "gpu-exp-sum-fp64" if reference else sdpa_policy
         write_json(out / "manifests/environment.json", environment())
         if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
             raise ValueError("real smoke requires exactly one visible allocated CUDA GPU")
@@ -128,16 +169,27 @@ def run(args):
             raise ValueError("dataset hash mismatch")
         write_json(out / "manifests/data.json", dataset_manifest)
         write_json(out / "manifests/run.json", cfg)
+        write_json(out / "manifests/metric_policy.json", METRIC_POLICY)
         write_json(out / "manifests/implementation.json", {str(p.relative_to(Path(__file__).parent)): file_digest(p)
                    for p in sorted(Path(__file__).parent.glob("*.py"))})
         stage = "model_load"
         mod, models = load(cfg, dataset_manifest, args.upstream, out / "reports")
         models["sdpa_kernel_policy"] = sdpa_policy
-        models["sdpa_policy_scope"] = "all baseline/calibration/generation/endpoint forward calls"
+        models["metric_policy"] = METRIC_POLICY
+        models["execution_policy"] = policy
+        if reference:
+            models["loading_precision"] = models.pop("precision", None)
+            models["precision"] = {"target_storage": "float32 (original loaded values)",
+                                   "target_compute_and_KV": "float64",
+                                   "drafter_and_guidance": "bfloat16", "metric_softmax": "CPU float64",
+                                   "note": policy["note"]}
+        models["sdpa_policy_scope"] = ("Drafter math SDPA; Target GPU FP64 exp/sum override for all forwards"
+                                       if reference else "all baseline/calibration/generation/endpoint forward calls")
         write_json(out / "manifests/models.json", models)
         evaluation = [r for r in natural if r["split"] == "smoke"]
         calibration = [r for r in natural if r["split"] == "calibration"]
-        if len(evaluation) != 4 * cfg["smoke_per_domain"] or len(binding) != 2 * cfg["binding_pairs"]:
+        if (len(calibration) != cfg["calibration_count"] or len(evaluation) != 4 * cfg["smoke_per_domain"]
+                or len(binding) != 2 * cfg["binding_pairs"]):
             raise ValueError("unexpected smoke manifest counts")
         baseline_prompts = [r["prompt"] for r in evaluation[:2]]
         shard_index, shard_count = getattr(args, "shard_index", 0), getattr(args, "shard_count", 1)
@@ -147,14 +199,19 @@ def run(args):
                    "evaluation_prompt_ids": [r["prompt_id"] for r in evaluation],
                    "binding_prompt_ids": [r["prompt_id"] for r in binding]})
         torch.cuda.reset_peak_memory_stats()
-        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16), attention_context:
+        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16), attention_context, \
+                execution_context(mod, reference, tests):
             stage = "baseline"
+            print(f"S1 measurement starting: {policy['id']}", flush=True)
             tests["baseline"], tolerance = baseline_tests(mod, baseline_prompts, cfg)
             tests["tolerance"] = tolerance
+            print(f"Baseline passed; frozen tolerance: {tolerance}", flush=True)
             write_json(out / "reports/tests.json", tests)
             stage = "calibration"
             pool = []
-            for row in calibration:
+            for number, row in enumerate(calibration, 1):
+                print(f"Calibration {number}/{len(calibration)}: {row['prompt_id']}", flush=True)
+                checkpoint()
                 with preserved_rng():
                     torch.manual_seed(cfg["seed"])
                     snap, tensor_map = capture_prompt(mod, row, cfg["max_new_tokens"])
@@ -172,7 +229,9 @@ def run(args):
             write_json(out / "manifests/calibration.json", {"requested": len(calibration), "valid": len(pool),
                       "prompt_ids": [r["prompt_id"] for r in pool], "scope": "UltraChat train_sft only"})
             stage = "natural_endpoints"
-            for row in evaluation:
+            for number, row in enumerate(evaluation, 1):
+                print(f"Natural effects {number}/{len(evaluation)}: {row['prompt_id']}", flush=True)
+                checkpoint()
                 with preserved_rng():
                     torch.manual_seed(cfg["seed"])
                     snap, _ = capture_prompt(mod, row, cfg["max_new_tokens"])
@@ -188,7 +247,7 @@ def run(args):
                 save_boundary(out, row, snap, checks, args.save_snapshots)
                 tests["cases"].append({"prompt_id": row["prompt_id"], "status": "ok", "checks": checks})
                 del snap
-                write_csv(out / "results/S1_endpoint.csv", results)
+                checkpoint()
             stage = "binding_endpoints"
             grouped = {}
             for row in binding:
@@ -199,6 +258,8 @@ def run(args):
                 # Two small CPU snapshots only; no persistent collection of GPU caches.
                 snaps = [synthetic_snapshot(mod, row) for row in pair]
                 for index, row in enumerate(pair):
+                    print(f"Binding effects: {row['prompt_id']}", flush=True)
+                    checkpoint()
                     snap, partner = snaps[index], pair[1 - index]
                     p, checks = validate_snapshot(mod, snap, tolerance)
                     rows, detail = case_rows(mod, row, snap, p, checks, tolerance,
@@ -208,9 +269,9 @@ def run(args):
                     save_boundary(out, row, snap, checks, args.save_snapshots)
                     tests["cases"].append({"prompt_id": row["prompt_id"], "status": "ok", "checks": checks})
                 del snaps
-                write_csv(out / "results/S1_endpoint.csv", results)
+                checkpoint()
         tests["peak_memory"] = {"allocated_bytes": torch.cuda.max_memory_allocated(), "reserved_bytes": torch.cuda.max_memory_reserved(),
-                                "scope": "post-load baseline and diagnostics, not throughput"}
+                                "scope": "post-load baseline/calibration/S1 effects, not throughput"}
         status = "complete" if len(cases) == len(evaluation) + len(binding) and len(pool) == len(calibration) else "partial"
     except Exception as exc:
         tests["error"] = safe_error(exc)
@@ -225,13 +286,15 @@ def run(args):
         print(f"Stopped at {stage}: {safe_error(exc)}", file=sys.stderr)
     finally:
         for result in results:
-            result.setdefault("run_valid", status != "failed")
+            result["run_valid"] = status == "complete"
             result["checkpoint_revision"] = cfg["checkpoint_revision"]
+            result["metric_policy_id"] = METRIC_POLICY["id"]
+            result["execution_policy_id"] = policy["id"]
         tests.update(status=status, stage=stage)
         write_json(out / "reports/tests.json", tests)
         write_csv(out / "results/S1_endpoint.csv", results)
         write_json(out / "results/cases.json", cases)
-        lines = ["# S1 endpoint cases", "", f"Run status: {status}", "",
+        lines = ["# S1 endpoint cases", "", f"Run status: {status}", f"Execution policy: {policy['id']}", "",
                  "Endpoint sensitivity only; not removal of all target information, full reasoning validation, or a speed result.", ""]
         for detail in cases:
             lines.extend([f"## {detail['prompt_id']}", "", f"Prefix tail: {detail['prefix_tail']}", "",
@@ -243,10 +306,12 @@ def run(args):
         (out / "results/S1_cases.md").write_text("\n".join(lines), encoding="utf-8")
         (out / "reports/HANDOFF.md").write_text(
             f"# S1 run handoff\n\nStatus: **{status}**. Stage: {stage}.\n\n"
+            f"Execution policy: {policy['id']}. Precision: {policy['precision']}.\n\n"
             f"Completed endpoint cases: {len(cases)}. Row statuses: {dict(Counter(r['status'] for r in results))}.\n\n"
             f"Error: {tests.get('error', 'none')}. All identity/alignment evidence is in tests.json.\n\n"
             "No model training, S2/EAGLE implementation, or speed claim. If failed, numeric rows are not valid research results. "
             "If complete, inspect individual cases before choosing S2 or EAGLE endpoint replication.\n", encoding="utf-8")
+        print(f"S1 measurement {status}: {len(cases)} endpoint cases; results: {out / 'results/S1_endpoint.csv'}", flush=True)
     return 0 if status == "complete" else 2
 
 
@@ -270,6 +335,8 @@ if __name__ == "__main__":
     parser.add_argument("--data-dir", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--save-snapshots", action="store_true")
+    parser.add_argument("--target-fp64-reference", action="store_true",
+                        help="Explicit S1 FP64 Target/GPU exp-sum reference; not official_eval reproduction")
     parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--shard-count", type=int, default=1)
     raise SystemExit(run(parser.parse_args()))

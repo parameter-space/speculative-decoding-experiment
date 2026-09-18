@@ -7,7 +7,7 @@
 #SBATCH --gres=gpu:high_perf:2
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=128G
-#SBATCH --time=02:00:00
+#SBATCH --time=1-00:00:00
 #SBATCH --output=logs/s1-%j.out
 #SBATCH --error=logs/s1-%j.err
 set -euo pipefail
@@ -18,5 +18,5 @@ export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
 export PYTHONUNBUFFERED=1
-printf '%s\n' 'S1 smoke: math SDPA, unchanged precision/tolerances, cached models/data.'
+printf '%s\n' 'S1 smoke: math SDPA, CPU FP64 metrics, unchanged model precision/gate caps, cached models/data.'
 bash scripts/run_k2.sh

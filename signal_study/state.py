@@ -57,17 +57,49 @@ def logical_prefix(ids, mask, positions, curr):
     return cpu(logical)
 
 
-def distribution(logits):
-    result = logits.float().softmax(-1).reshape(-1)
-    validate_probability(result)
+PROBABILITY_SUM_CAP = 1e-5
+METRIC_POLICY = {"id": "cpu-fp64-probability-v1", "device": "cpu",
+                 "softmax": "float64", "probability_accumulation": "float64",
+                 "sum_cap": PROBABILITY_SUM_CAP, "renormalize": False}
+
+
+def _logit_vector(logits, context):
+    # Never merge multiple token/batch distributions into one vocabulary vector.
+    if (logits.ndim < 1 or not logits.numel() or logits.numel() != logits.shape[-1]
+            or not logits.is_floating_point() or not torch.isfinite(logits).all()):
+        raise ValueError(f"{context}: invalid single-token logits; shape={tuple(logits.shape)}, dtype={logits.dtype}")
+    return logits.detach().to("cpu").reshape(-1)
+
+
+def distribution(logits, *, context="distribution"):
+    # Measurement only: do not change model forwards or upstream token sampling.
+    result = _logit_vector(logits, context).double().softmax(-1)
+    validate_probability(result, context=context)
     return result
 
 
-def validate_probability(p):
+def validate_probability(p, *, context="probability"):
     if p.ndim != 1 or not p.numel() or not torch.isfinite(p).all() or (p < 0).any():
-        raise ValueError("invalid probability vector")
-    if abs(p.sum().item() - 1) > 1e-5:
-        raise ValueError("probabilities do not sum to one")
+        raise ValueError(f"{context}: invalid probability vector; shape={tuple(p.shape)}, dtype={p.dtype}")
+    total = p.sum(dtype=torch.float64).item()
+    if abs(total - 1) > PROBABILITY_SUM_CAP:
+        raise ValueError(f"{context}: probabilities do not sum to one; shape={tuple(p.shape)}, "
+                         f"dtype={p.dtype}, sum={total:.17g}, error={abs(total - 1):.9g}, "
+                         f"cap={PROBABILITY_SUM_CAP}")
+
+
+def probability_audit(logits, *, context):
+    """Compare old/new measurement arithmetic on identical logits, without masking failures."""
+    vector = _logit_vector(logits, context)
+    report = {"context": context, "logits_shape": list(logits.shape), "logits_dtype": str(logits.dtype)}
+    for label, dtype in (("float32", torch.float32), ("float64", torch.float64)):
+        p = vector.to(dtype).softmax(-1)
+        native_sum, sum64 = p.sum().item(), p.sum(dtype=torch.float64).item()
+        report[label] = {"native_sum": native_sum, "sum_fp64": sum64,
+                         "native_sum_error": abs(native_sum - 1), "sum_fp64_error": abs(sum64 - 1),
+                         "native_sum_gate_passed": abs(native_sum - 1) <= PROBABILITY_SUM_CAP,
+                         "fp64_sum_gate_passed": abs(sum64 - 1) <= PROBABILITY_SUM_CAP}
+    return report
 
 
 def overlap(p, q):
@@ -75,4 +107,4 @@ def overlap(p, q):
     validate_probability(q)
     if p.shape != q.shape:
         raise ValueError("vocabulary mismatch")
-    return torch.minimum(p, q).sum().item()
+    return torch.minimum(p, q).sum(dtype=torch.float64).item()

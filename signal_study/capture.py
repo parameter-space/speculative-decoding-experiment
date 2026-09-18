@@ -147,7 +147,7 @@ def target_logits(mod, snapshot, cached=False):
 
 
 def source_metadata(snapshot, row):
-    p = distribution(snapshot["p_src_logits"])
+    p = distribution(snapshot["p_src_logits"], context="target.source")
     positive = p > 0
     return {"prompt_id": row["prompt_id"], "domain": row["domain"], "split": row["split"],
             "z_id": int(snapshot["prefix"][-1]), "p_src_argmax": int(p.argmax()),

@@ -134,7 +134,8 @@ def load(cfg, dataset_manifest, repo, report_dir):
                "checkpoint_config": model_cfg, "target_revision": dataset_manifest["target_revision"],
                "drafter_revision": dataset_manifest["drafter_revision"], "precision": {
                    "target_weights": "float16", "drafter_and_guidance_weights": "bfloat16",
-                   "cuda_autocast": "bfloat16", "metric_softmax": "float32",
+                   "cuda_autocast": "bfloat16", "metric_softmax": "float64",
+                   "metric_device": "cpu", "metric_probability_accumulation": "float64",
                    "note": "Matches official eval weight/autocast choices; not uniformly BF16 target weights."},
                "attention_backend": cfg["attention_backend"], "models": {}}
     for name, obj in (("target", mod.v_base), ("drafter", mod.d_base), ("delta_projection", mod.latent_mod_prep),

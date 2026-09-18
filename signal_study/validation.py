@@ -14,7 +14,9 @@ class ValidationError(RuntimeError):
 def error(a, b):
     if a.shape != b.shape or not torch.isfinite(a).all() or not torch.isfinite(b).all():
         raise ValidationError("nonfinite or incompatible tensors")
-    return float((a.float().cpu() - b.float().cpu()).abs().max())
+    # A high-precision reference must not be rounded to FP32 before measuring its error.
+    dtype = torch.float64 if torch.float64 in (a.dtype, b.dtype) else torch.float32
+    return float((a.to(device="cpu", dtype=dtype) - b.to(device="cpu", dtype=dtype)).abs().max())
 
 
 def require_error(a, b, tolerance, name):
@@ -67,7 +69,8 @@ def baseline_tests(mod, prompts, cfg):
             tail = mod.v_base.get_decoder()(prefix[:, -1:], past_key_values=cache, use_cache=True)
             logits_split = mod.v_base.lm_head(tail.last_hidden_state[:, -1])
             kernel_error = error(logits_full, logits_split)
-            kernel_tv = float((distribution(logits_full) - distribution(logits_split)).abs().sum() / 2)
+            kernel_tv = float((distribution(logits_full, context="baseline.full")
+                               - distribution(logits_split, context="baseline.split")).abs().sum() / 2)
             if kernel_error > cfg["alignment_logit_cap"] or kernel_tv > cfg["alignment_tv_cap"]:
                 raise ValidationError(
                     "independent clean-prefix kernel discrepancy exceeds predeclared cap: "
@@ -93,23 +96,35 @@ def baseline_tests(mod, prompts, cfg):
 
 
 @torch.no_grad()
-def validate_snapshot(mod, snapshot, tolerance):
+def validate_snapshot(mod, snapshot, tolerance, *, diagnostics=None):
     original = snapshot["q_original_logits"]
     repeat = draft_logits(mod, snapshot, stored_delta=True)
     repeat2 = draft_logits(mod, snapshot, stored_delta=True)
-    tests = {"restore": require_error(original, repeat, tolerance["repeat"], "snapshot restore"),
+    tests = {} if diagnostics is None else diagnostics
+    tests.update({"restore": require_error(original, repeat, tolerance["repeat"], "snapshot restore"),
              "repeat": require_error(repeat, repeat2, tolerance["repeat"], "repeat"),
              "G_to_Delta": require_error(snapshot["guides"], mod.latent_mod_prep(snapshot["G"].to(mod.device)),
                                          tolerance["repeat"], "G to Delta"),
              "self_copy": require_error(original, draft_logits(mod, snapshot, snapshot["G"].clone()),
-                                        tolerance["repeat"], "self-copy")}
+                                        tolerance["repeat"], "self-copy")})
     fresh, cached = target_logits(mod, snapshot), target_logits(mod, snapshot, cached=True)
-    tests["p_fresh_cached"] = require_error(fresh, cached, tolerance["alignment"], "logical vs physical target prefix")
-    p, q = distribution(fresh), distribution(original)
-    tests["p_fresh_cached_TV"] = float((p - distribution(cached)).abs().sum() / 2)
+    # Preserve both measurements even when the logit gate raises first.
+    tests["p_fresh_cached"] = error(fresh, cached)
+    p = distribution(fresh, context="target.fresh")
+    q = distribution(original, context="drafter.original")
+    tests["p_fresh_cached_TV"] = float((p - distribution(cached, context="target.cached")).abs().sum() / 2)
+    tests["p_sum"], tests["q_sum"] = float(p.sum()), float(q.sum())
+    tests["alignment_tv_tolerance"] = tolerance["alignment_tv"]
+    require_error(fresh, cached, tolerance["alignment"], "logical vs physical target prefix")
     if tests["p_fresh_cached_TV"] > tolerance["alignment_tv"]:
-        raise ValidationError("logical vs physical target probability TV exceeds frozen tolerance")
+        raise ValidationError(
+            "logical vs physical target probability TV exceeds frozen tolerance: "
+            f"TV={tests['p_fresh_cached_TV']:.12g}, cap={tolerance['alignment_tv']:.12g}, "
+            f"max_logit_error={tests['p_fresh_cached']:.9g}, "
+            f"fresh_argmax={fresh.argmax(-1).item()}, cached_argmax={cached.argmax(-1).item()}, "
+            f"prefix_tokens={len(snapshot['prefix'])}, physical_tokens={snapshot['curr'] + 1}, "
+            f"cache_tokens={snapshot['v_cache']['length']}"
+        )
     if len(p) != len(q):
         raise ValidationError("full-vocabulary size mismatch")
-    tests["p_sum"], tests["q_sum"] = float(p.sum()), float(q.sum())
     return p, tests
